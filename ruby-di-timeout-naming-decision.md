@@ -446,6 +446,8 @@ Based on web response time research:
 - **Typical Ruby responses:** 200-400ms (1.5-2x slower than Java)
 - **Best-in-class APIs:** P50 < 200ms, P90 < 500ms, P99 < 1s
 
+**Note from maintainer:** The research above may underestimate actual processing time of Ruby applications in production. Real-world Ruby apps with complex business logic, database queries, and external API calls often take longer than the benchmarked simple endpoints. The 200ms timeout should be validated against actual production workloads.
+
 **Overhead Analysis:**
 - **Java's 100ms timeout** = 50% overhead on a 200ms request
 - **Ruby's 200ms timeout** = 100% overhead on a 200ms request
