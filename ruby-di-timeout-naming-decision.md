@@ -1,8 +1,9 @@
 # Ruby DI Timeout Configuration: Naming Decision
 
 **Decision Date:** 2026-02-20
-**Status:** Recommendation
+**Status:** Final Decision
 **Component:** Ruby Dynamic Instrumentation Circuit Breaker
+**Default Value:** 200ms
 
 ## Executive Summary
 
@@ -10,11 +11,35 @@ Ruby needs an environment variable to configure the DI circuit breaker timeout. 
 
 | Option | Name | Pro | Con | Recommendation |
 |--------|------|-----|-----|----------------|
-| **A** | `DD_DYNAMIC_INSTRUMENTATION_MAX_PROCESSING_TIME` | ✅ Ruby convention<br>✅ Descriptive name | ❌ Harder to discover<br>❌ Longer name<br>❌ Different from Java/Node | ⚠️ OPTION |
-| **B** | `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT` | ✅ **Matches Java**<br>✅ Ruby convention<br>✅ Easy discovery<br>✅ Cross-language consistency | ❌ Default differs from Java<br>(500ms vs 100ms) | **✅ RECOMMENDED** |
-| **C** | `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT_MS` | ✅ Matches Node | ❌ **Breaks Ruby convention**<br>❌ First `_MS` in Ruby codebase<br>❌ Node uses wrong suffix | ❌ **DO NOT USE** |
+| **A** | `DD_DYNAMIC_INSTRUMENTATION_MAX_PROCESSING_TIME` | ✅ Ruby convention<br>✅ Descriptive name | ❌ Harder to discover<br>❌ Longer name<br>❌ Different from Java/Node | ❌ REJECTED |
+| **B** | `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT` | ✅ **Matches Java**<br>✅ Ruby convention<br>✅ Easy discovery<br>✅ Cross-language consistency | ❌ Default differs from Java<br>(200ms vs 100ms) | **✅ FINAL DECISION** |
+| **C** | `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT_MS` | ✅ Matches Node | ❌ **Breaks Ruby convention**<br>❌ First `_MS` in Ruby codebase<br>❌ Node uses wrong suffix | ❌ REJECTED |
 
-**Verdict:** Use **Option B** (`DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT`)
+**Final Decision:** Use **Option B** (`DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT`) with **200ms default**
+
+---
+
+## Implementation Summary
+
+```ruby
+# Final configuration in lib/datadog/di/configuration/settings.rb
+option :capture_timeout do |o|
+  o.type :float
+  o.default 0.2  # 200ms
+  o.env 'DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT'
+  o.env_parser do |value|
+    return nil if value.nil? || value.empty?
+    float_value = value.to_f
+    float_value < 0 ? nil : float_value
+  end
+end
+```
+
+**Rationale:**
+- **Name:** Matches Java exactly for cross-language consistency
+- **Default:** 200ms provides 100% overhead on typical 200ms Ruby requests
+- **Convention:** No `_MS` suffix (Ruby standard, matches Java)
+- **Discovery:** Java users find Ruby config instantly
 
 ---
 
@@ -26,12 +51,13 @@ Ruby needs an environment variable to configure the DI circuit breaker timeout. 
 |----------|---------|---------|-------------------|
 | **Java** | `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT` | 100ms | ✅ No suffix |
 | **Node.js** | `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT_MS` | 15ms (actual)<br>100ms (docs) ❌ | ❌ Uses `_MS` |
-| **Ruby** | `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT` | 500ms | ✅ No suffix |
+| **Ruby** | `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT` | **200ms** | ✅ No suffix |
 
 **Key Observations:**
 - **Java and Ruby both avoid unit suffixes** - this is the established pattern
 - **Node.js is the outlier** with `_MS` suffix
-- **Defaults vary** (100ms Java, 15ms Node, 500ms Ruby) but all control same thing
+- **Defaults vary** (100ms Java, 15ms Node, 200ms Ruby) but all control same thing
+- **Ruby's 200ms default** provides 100% overhead on typical 200ms requests, vs Java's 50% overhead
 
 ---
 
@@ -104,20 +130,20 @@ Ruby needs an environment variable to configure the DI circuit breaker timeout. 
 ### ❌ Weaknesses
 
 1. **Different Default Values**
-   - Java default: 100ms
-   - Ruby default: 500ms (5x higher)
+   - Java default: 100ms (50% overhead on typical 200ms request)
+   - Ruby default: 200ms (100% overhead on typical 200ms request)
    - **But:** Different defaults are okay and expected across languages
    - **Mitigation:** Clearly document defaults in each tracer
 
 2. **Must Document Default Differences**
    ```bash
-   # Java: Conservative default
+   # Java: Conservative default (50% overhead)
    DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=100  # 100ms
 
-   # Ruby: More lenient default
-   DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=500  # 500ms
+   # Ruby: Balanced default (100% overhead)
+   DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=200  # 200ms
    ```
-   **Mitigation:** Document rationale (Ruby's implementation characteristics warrant higher default)
+   **Mitigation:** Document rationale - Ruby's 200ms provides appropriate overhead for typical 200ms web requests, accounting for slightly slower serialization while staying under 1s (P99 target)
 
 ### 📊 Impact Analysis
 
@@ -129,8 +155,9 @@ Ruby needs an environment variable to configure the DI circuit breaker timeout. 
 - ✅ Ruby ecosystem: Aligns with Java's established pattern
 
 **Trade-offs:**
-- ⚠️ Must document that defaults differ (5x)
+- ⚠️ Must document that defaults differ (2x: 200ms vs 100ms)
 - ⚠️ This is minor - users expect language-specific tuning
+- ✅ Both defaults follow same philosophy: balance overhead vs capability
 
 **Risk Level:** 🟢 **LOW** - Standard cross-language configuration pattern
 
@@ -164,8 +191,9 @@ Ruby needs an environment variable to configure the DI circuit breaker timeout. 
 
 3. **Massive Default Difference**
    - Node default: 15ms
-   - Ruby default: 500ms (33x higher!)
-   - Same name with 33x different defaults is confusing
+   - Ruby default: 200ms (13x higher!)
+   - Same name with very different defaults is confusing
+   - Even worse: Node's 15ms is likely too aggressive for real-world usage
 
 4. **Inconsistent with Node's Own Pattern**
    - Node uses no suffix for shared configs (`DD_TELEMETRY_HEARTBEAT_INTERVAL`)
@@ -210,17 +238,18 @@ Ruby needs an environment variable to configure the DI circuit breaker timeout. 
 
 **Team has:** Java, Node.js, Ruby services with DI enabled
 
-**With Option B (CAPTURE_TIMEOUT - RECOMMENDED):**
+**With Option B (CAPTURE_TIMEOUT - FINAL DECISION):**
 ```bash
 # Java service
-DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=100  # Java default
+DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=100  # Java default (50% overhead)
 
 # Ruby service
-DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=500  # Ruby default (5x higher)
+DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=200  # Ruby default (100% overhead)
 
 # DevOps engineer: "Ruby uses higher default than Java"
-# Checks documentation: "Ruby's implementation uses more lenient default (500ms vs 100ms)"
-# Sets both to custom value: DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=200
+# Checks documentation: "Ruby's 200ms provides 100% overhead vs Java's 50%"
+# Both defaults are reasonable for their respective language characteristics
+# Can override if needed: DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=150
 # Works consistently across both services
 ```
 ✅ Same name, easy to configure consistently, documented default differences
@@ -231,7 +260,7 @@ DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=500  # Ruby default (5x higher)
 DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=100
 
 # Ruby service
-DD_DYNAMIC_INSTRUMENTATION_MAX_PROCESSING_TIME=500
+DD_DYNAMIC_INSTRUMENTATION_MAX_PROCESSING_TIME=200
 
 # DevOps engineer: "Why are these named differently?"
 # Searches for Ruby equivalent of CAPTURE_TIMEOUT
@@ -242,12 +271,12 @@ DD_DYNAMIC_INSTRUMENTATION_MAX_PROCESSING_TIME=500
 
 ### Scenario 2: Copy-Paste Configuration
 
-**With Option B (CAPTURE_TIMEOUT - RECOMMENDED):**
+**With Option B (CAPTURE_TIMEOUT - FINAL DECISION):**
 ```bash
 # User copies Java config template:
-DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=200  # ✅ Works in Ruby!
-# Works as expected, using custom 200ms timeout
-# User notices Ruby's default is 500ms (from docs), adjusts if needed
+DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=150  # ✅ Works in Ruby!
+# Works as expected, using custom 150ms timeout
+# User notices Ruby's default is 200ms (from docs), custom value works fine
 ```
 ✅ Seamless copy-paste, standard cross-language pattern
 
@@ -263,21 +292,22 @@ DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=200  # ❌ Doesn't work in Ruby
 
 ### Scenario 3: Documentation Writing
 
-**With Option B (CAPTURE_TIMEOUT - RECOMMENDED):**
+**With Option B (CAPTURE_TIMEOUT - FINAL DECISION):**
 ```markdown
 ## Ruby Configuration
 - `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT`: Snapshot capture timeout in milliseconds
 
-**Default:** 500ms (vs Java: 100ms, Node: 15ms)
+**Default:** 200ms (vs Java: 100ms, Node: 15ms)
 
-Ruby uses a higher default due to [implementation characteristics].
-Set lower for faster failure, higher for complex object serialization.
+Ruby uses 200ms (100% overhead on typical requests) vs Java's 100ms (50% overhead).
+This accounts for Ruby's slightly slower serialization while maintaining responsive behavior.
 
 **Cross-language:**
-- Java: Same variable name, 100ms default
+- Java: Same variable name, 100ms default (50% overhead)
+- Ruby: Same variable name, 200ms default (100% overhead)
 - Node: Similar (but with `_MS` suffix), 15ms default
 ```
-✅ Clear, simple documentation with cross-language comparison
+✅ Clear, simple documentation with cross-language comparison and overhead rationale
 
 **With Option A (MAX_PROCESSING_TIME):**
 ```markdown
@@ -288,7 +318,7 @@ Set lower for faster failure, higher for complex object serialization.
 and Node's `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT_MS`. Ruby uses a different name
 because [reasons]. When migrating from Java, use this instead of CAPTURE_TIMEOUT.
 
-**Default:** 500ms (equivalent to Java's 100ms timeout but different concept)
+**Default:** 200ms (equivalent to Java's 100ms timeout but different concept)
 
 **Cross-language mapping:**
 - Java: `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT` → Ruby: Use `MAX_PROCESSING_TIME` instead
@@ -320,10 +350,11 @@ because [reasons]. When migrating from Java, use this instead of CAPTURE_TIMEOUT
    - Does NOT break any Ruby conventions
 
 4. **Different Defaults Are Normal and Expected**
-   - Every language has language-specific tuning (Java: 100ms, Ruby: 500ms)
+   - Every language has language-specific tuning (Java: 100ms, Ruby: 200ms)
    - Different defaults don't require different names
-   - Documentation easily explains: "Ruby uses higher default due to [reason]"
+   - Documentation easily explains: "Ruby uses 200ms (100% overhead) vs Java's 100ms (50% overhead)"
    - This is standard practice across all Datadog configs
+   - Both defaults follow the same philosophy: balance performance impact vs capability
 
 5. **Lower Support Burden**
    - Standard cross-language configuration pattern
@@ -339,18 +370,21 @@ because [reasons]. When migrating from Java, use this instead of CAPTURE_TIMEOUT
 
    `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT` - Snapshot capture timeout (milliseconds)
 
-   **Default:** 500ms
+   **Default:** 200ms
 
-   Note: Ruby's default is higher than Java (100ms) due to implementation characteristics.
-   For Java-like behavior, set: DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=100
+   Ruby's 200ms default provides 100% overhead on typical 200ms web requests, vs Java's
+   100ms (50% overhead). This accounts for Ruby's slightly slower serialization while
+   maintaining responsive behavior and staying well under P99 latency targets (< 1s).
+
+   For more aggressive timeouts, set: DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT=100
    ```
 
 2. **Create Cross-Language Comparison Table**
-   | Language | Variable | Default | Notes |
-   |----------|----------|---------|-------|
-   | Java | `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT` | 100ms | ✅ No suffix |
-   | Ruby | `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT` | 500ms | ✅ No suffix |
-   | Node | `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT_MS` | 15ms | ⚠️ Uses `_MS` suffix |
+   | Language | Variable | Default | Overhead on 200ms Request |
+   |----------|----------|---------|---------------------------|
+   | Java | `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT` | 100ms | 50% (100/200) |
+   | Ruby | `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT` | 200ms | 100% (200/200) |
+   | Node | `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT_MS` | 15ms | 7.5% (likely too aggressive) |
 
 3. **Highlight Ruby-Java Alignment**
    - Position Ruby and Java as consistent pair
@@ -393,15 +427,42 @@ because [reasons]. When migrating from Java, use this instead of CAPTURE_TIMEOUT
 - **Reduces ecosystem fragmentation** - strengthens Java-Ruby alignment
 
 ### Implementation Checklist
-- [ ] Use `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT` in code (no suffix)
-- [ ] Set default to 500ms (5x higher than Java's 100ms)
-- [ ] Document default difference prominently with rationale
-- [ ] Create cross-language comparison table highlighting Java-Ruby alignment
-- [ ] Show Node as outlier with `_MS` suffix
+- [x] Use `DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT` in code (no suffix)
+- [x] Set default to 200ms (2x Java's 100ms, provides 100% overhead vs Java's 50%)
+- [x] Document default difference prominently with overhead rationale
+- [x] Create cross-language comparison table highlighting Java-Ruby alignment
+- [ ] Show Node as outlier with `_MS` suffix in public docs
 - [ ] Update release notes emphasizing cross-language consistency
+- [x] Justify 200ms based on web response time research (typical Ruby: 200-400ms)
 
 ---
 
-**Document Version:** 1.0
+## Default Value Rationale
+
+### Why 200ms?
+
+Based on web response time research:
+- **Typical Java responses:** 200-300ms
+- **Typical Ruby responses:** 200-400ms (1.5-2x slower than Java)
+- **Best-in-class APIs:** P50 < 200ms, P90 < 500ms, P99 < 1s
+
+**Overhead Analysis:**
+- **Java's 100ms timeout** = 50% overhead on a 200ms request
+- **Ruby's 200ms timeout** = 100% overhead on a 200ms request
+- This accounts for Ruby being 1.5-2x slower at serialization
+- Still keeps total time under 400ms, well within P90 targets (< 500ms)
+- Allows sufficient time for complex object capture without excessive impact
+
+**Why not lower?**
+- 100ms (matching Java exactly) might be too aggressive for Ruby's serialization speed
+- 150ms would work but 200ms provides better margin for complex captures
+
+**Why not higher?**
+- 500ms (original) provided 250% overhead - too lenient
+- 200ms strikes the right balance between capability and performance
+
+---
+
+**Document Version:** 2.0
 **Last Updated:** 2026-02-20
-**Decision:** Recommend Option A
+**Decision:** Final - Use Option B (`DD_DYNAMIC_INSTRUMENTATION_CAPTURE_TIMEOUT`) with 200ms default
